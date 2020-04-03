@@ -1,27 +1,26 @@
 <?php
 /**
- * Created by viktor.
- * E-mail: vik.melnikov@gmail.com
- * GitHub: Viktor-Melnikov
- * Date: 27.07.17
+ * Created by Viktor Melnikov.
+ * Date: 2020-03-28
+ * GitHub: viktor-melnikov
  */
 
-if (! function_exists('str_contains')) {
+use Illuminate\Container\Container;
+
+if (! function_exists('app')) {
     /**
-     * Determine if a given string contains a given substring.
+     * Get the available container instance.
      *
-     * @param  string  $haystack
-     * @param  string|array  $needles
-     * @return bool
+     * @param string|null $abstract
+     * @param array $parameters
+     * @return mixed|\Illuminate\Contracts\Foundation\Application
      */
-    function str_contains($haystack, $needles)
+    function app($abstract = null, array $parameters = [])
     {
-        foreach ((array) $needles as $needle) {
-            if ($needle != '' && mb_strpos($haystack, $needle) !== false) {
-                return true;
-            }
+        if (is_null($abstract)) {
+            return Container::getInstance();
         }
 
-        return false;
+        return Container::getInstance()->make($abstract, $parameters);
     }
 }

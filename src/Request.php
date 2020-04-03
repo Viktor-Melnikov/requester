@@ -1,388 +1,169 @@
 <?php
-/**
- * Created by PhpStorm.
- * User: viktorthegreat
- * Date: 24.02.17
- * Time: 22:10
- */
+
+declare(strict_types=1);
 
 namespace Requester;
 
 use Exception;
 use GuzzleHttp\Client;
-use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Psr7\Response;
-use Requester\Handler\DefaultHandler;
-use Requester\Interfaces\HandlerInterface;
-use RuntimeException;
+use Illuminate\Support\Collection;
+use Requester\Concerns\AuthBasic;
+use Requester\Concerns\Handler;
+use Requester\Concerns\HashRequest;
+use Requester\Concerns\Header;
+use Requester\Concerns\Option;
+use Requester\Concerns\Payload;
+use Requester\Concerns\Uri;
+use Requester\Contracts\HandlerInterface;
+use Requester\Handlers\BlackHoleHandler;
 
+/**
+ * Class Request
+ */
 class Request
 {
+    use Option, Header, AuthBasic, Handler, HashRequest, Uri, Payload;
+
     /**
-     * Тип обработчика. Это класс имплементированный от HandlerInterface и
-     * с написанной реализацией сериализации body (payload) в строку запроса, и
-     * парсера ответа от API (response).
-     * Также поддерживает события.
-     *
      * @var HandlerInterface
      */
-    protected $handler;
-
-    public $uri;
-    public $payload;
-    public $serialized_payload = null;
-    public $method             = Http::GET;
-    public $headers            = [];
-    public $options            = [];
-    public $files              = [];
-    public $extras             = [];
-    public $auth               = [];
-    public $content_type; // mime
-
-    const OPENSSL_ENCRYPT_CMD = 'openssl smime -sign -signer "%s" -inkey "%s" -nochain -nocerts -outform PEM -nodetach -passin pass:%s';
+    private $handler;
 
     /**
-     * Алиас для того, чтобы кэшировать запросы. Запросы без алиаса не кэшируются.
-     *
-     * @var string
-     */
-    public $alias = '';
-
-    /**
-     * Конфигурация либы.
-     *
      * @var Collection
      */
-    public $config;
+    protected $config;
 
     /**
-     * Хэш заголовков, урла и сериализованного запроса (body)
-     *
-     * @var
+     * @var array
      */
-    public $hash = '';
+    private $files = [];
 
-    public function __construct()
+    /**
+     * @var null
+     */
+    public $preparePayload = null;
+
+    /**
+     * @var string
+     */
+    private $method = 'GET';
+
+    /**
+     * Request constructor.
+     *
+     * @param array $config
+     * @param bool $availableDefault
+     * @throws \Exception
+     */
+    public function __construct(array $config = [], $availableDefault = true)
     {
-        $this->setHandler(DefaultHandler::class);
+        $this
+            ->withConfig($config)
+            ->withHandler($this->config->get('handler', BlackHoleHandler::class));
+
+        !$availableDefault || $this->configureDefaults();
     }
 
     /**
-     * Установка конфигураций
-     *
-     * @param $data
-     *
+     * @param array $data
      * @return $this
      */
-    public function setConfig($data)
+    public function withConfig(array $data)
     {
-        $this->config = Collection::make($data);
+        $this->config = collect($data);
 
         return $this;
     }
 
     /**
-     * URL или URI адреса для отправки запроса
-     *
-     * @param $url
-     *
-     * @return $this
-     */
-    public function setEndpoint($url)
-    {
-        $this->uri = $url;
-
-        return $this;
-    }
-
-    /**
-     * Add an additional header to the request
-     * Can also use the cleaner syntax of
-     *
-     * @return $this
-     */
-    public function setHeader()
-    {
-        $args = func_get_args();
-
-        if (is_array($args[0])) {
-            foreach ($args[0] as $key => $value)
-                $this->headers['headers'][$key] = $value;
-        } else {
-            $this->headers['headers'][$args[0]] = $args[1];
-        }
-
-        return $this;
-    }
-
-    /**
-     * Set option cURL request (timeout, ssl_verify, etc..)
-     *
-     * @return $this
-     */
-    public function setOption()
-    {
-        $args = func_get_args();
-
-        $options = [];
-
-        if (is_array($args[0])) {
-            foreach ($args[0] as $key => $value)
-                $options[$key] = $value;
-        } else {
-            $options[$args[0]] = $args[1];
-        }
-
-        $this->options += $options;
-
-        return $this;
-    }
-
-    /**
-     * Set the method.  Shouldn't be called often as the preferred syntax
-     * for instantiation is the method specific factory methods.
-     *
-     * @return Request this
-     *
      * @param string $method
+     * @return $this
      */
-    public function setMethod($method)
+    public function withMethod(string $method)
     {
-        if (!empty($method)) {
-            $this->method = $method;
-        }
+        $this->method = $method;
 
         return $this;
     }
 
     /**
-     * Set the method.  Shouldn't be called often as the preferred syntax
-     * for instantiation is the method specific factory methods.
-     *
      * @param array $file
-     *
-     * @return Request this
-     *
+     * @return $this
      */
     public function setFile(array $file)
     {
-        if (!empty($file)) {
-            $this->files = $file;
-        }
+        $this->files = $file;
 
         return $this;
     }
 
     /**
-     * @param array $extra
-     *
-     * @return $this
+     * @param string $path
+     * @param string|null $password
+     * @return Request
      */
-    public function setExtras(array $extra)
+    public function certificate(string $path, ?string $password = null)
     {
-        if (!empty($extra)) {
-            $this->extras = array_merge($this->extras, $extra);
-        }
-
-        return $this;
+        return $this->withOption('cert', [$path, $password]);
     }
 
     /**
-     * Базовая авторизация на ресурсе
-     *
-     * @return $this
+     * @param string $path
+     * @return Request
      */
-    public function basicAuth()
+    public function ssl(string $path)
     {
-        $auth = ['auth' => [$this->config->get('auth.basic.username'), $this->config->get('auth.basic.password')]];
-
-        $this->options += $auth;
-
-        return $this;
+        return $this->withOption('ssl_key', $path);
     }
 
     /**
-     * Прикрепление сертификата
-     *
-     * @param $path
-     * @param $password
-     *
-     * @return $this
-     */
-    public function cert($path, $password = null)
-    {
-        $options = ['cert' => [$path, $password]];
-
-        $this->options += $options;
-
-        return $this;
-    }
-
-    /**
-     * Прикрепление ключа к сертификату
-     *
-     * @param $path
-     *
-     * @return $this
-     */
-    public function ssl_key($path)
-    {
-        $options = ['ssl_key' => $path];
-
-        $this->options += $options;
-
-        return $this;
-    }
-
-    /**
-     * Set the body of the request
-     *
-     *
-     * @param mixed $payload
-     *
-     * @return Request this
-     */
-    public function body($payload)
-    {
-        if (!empty($payload) || is_array($payload)) {
-            $this->payload = $payload;
-        }
-
-        return $this;
-    }
-
-    /**
-     * Установка обработчика запросов
-     *
-     * @param $handler
-     *
-     * @return $this
-     */
-    public function setHandler($handler)
-    {
-        $handler = new $handler($this->config);
-
-        if (!$handler instanceof HandlerInterface) {
-            throw new \RuntimeException('Handler not initialized. Please use Handler class instanceof HandlerInterface.');
-        }
-
-        $this->handler = $handler;
-
-        return $this;
-    }
-
-    /**
-     * Helper function to set the Content-Type and Expected as same in
-     * one swoop
-     *
-     * @return Request this
-     *
-     * @param string $mime mime type to use for content type and expected return type
-     */
-    public function setMime($mime)
-    {
-        if (!empty($mime)) {
-            $this->setContentType(
-                Mime::getFullMime($mime)
-            );
-        }
-
-        return $this;
-    }
-
-    /**
-     * Тип передаваемых данных
-     *
-     * @param $contentType
-     *
-     * @return $this
-     */
-    public function setContentType($contentType)
-    {
-        $this->content_type = $contentType;
-
-        $this->headers['headers']['Content-type'] = $contentType;
-
-        return $this;
-    }
-
-    /**
-     * Установка названия запроса (необходимо для идентификации запроса и для кэширования)
-     *
-     * @param $name
-     *
-     * @return $this
-     */
-    public function setAlias($name)
-    {
-        if (!empty($name)) {
-            $this->alias = $name;
-        }
-
-        return $this;
-    }
-
-    /**
-     * Вызов методов обработчика запросов
-     *
      * @return mixed
-     */
-    public function handle()
-    {
-        $arguments    = func_get_args();
-        $handleMethod = array_shift($arguments);
-
-        return call_user_func_array([$this->handler->initialize($this), $handleMethod], $arguments);
-    }
-
-    /**
-     * Actually send off the request, and parse the response
-     * @return array|string of parsed results
-     * @throws \GuzzleHttp\Exception\GuzzleException
+     * @throws \Exception
      */
     public function send()
     {
-        $this->hash();
+        $this->generateHash();
 
-        if ($data = $this->handle('beforeExecuteReturn')) {
+        if ($data = $this->runHandler('hasCachedData')) {
             return $data;
         }
 
         if (!empty($this->payload)) {
-            $this->serialized_payload = $this->handle('serialize', $this->payload);
+            $this->preparePayload = $this->runHandler('prepareData', $this->payload);
         }
 
-        $this->uri = $this->formatEndpoint();
-
-        $this->handle('beforeExecute');
+        $this->runHandler('beforeExecute');
 
         $exception = false;
-        $res       = null;
+        $response = null;
 
         try {
             $client = new Client();
 
-            $res = $client->request(
+            $response = $client->request(
                 $this->method,
-                $this->uri,
-                $this->headers + $this->formatBody() + $this->options
+                $this->getUri(),
+                $this->getHeaders() + $this->getPayload() + $this->getOptions()
             );
 
         } catch (Exception $e) {
             $exception = $e;
-        }
+        } finally {
+            if (is_bool($exception) && $response instanceof Response) {
+                $response = $this->runHandler('parseData', $response->getBody());
 
-        if (is_bool($exception) && $res instanceof Response) {
-            $body = $this->handle('parse', $res->getBody());
+                if ($data = $this->runHandler('setCachedData', $response)) {
+                    return $response;
+                }
 
-            if ($data = $this->handle('afterExecuteReturn', $body)) {
-                return $data;
+                $this->runHandler('afterExecute', $response);
+
+                return $response;
             }
-
-            $this->handle('afterExecute', $body);
-
-            return $body;
         }
+
 
         $msg = null;
 
@@ -402,78 +183,61 @@ class Request
     }
 
     /**
-     * Данные с соответствуюшим ключом, исходя из типа данных, формы данных и метода передачи данных
-     *
+     * Дамп объекта
+     */
+    public function dump()
+    {
+        dd($this);
+    }
+
+    /**
+     * @throws \Exception
+     */
+    private function configureDefaults()
+    {
+        if ($this->config->has('url')) {
+            $this->withUrl($this->config->get('url'));
+        }
+
+        if ($this->config->has('headers')) {
+            $this->withHeader($this->config->get('headers'));
+        }
+
+        if ($this->config->has('options')) {
+            $this->withOption($this->config->get('options'));
+        }
+
+        if ($this->config->has('certificate')) {
+            [$path, $password] = array_values($this->config->get('certificate'));
+
+            $this->certificate($path, $password);
+        }
+
+        if ($this->config->has('ssl')) {
+            $this->ssl($this->config->get('ssl'));
+        }
+
+        if (isset($this->config->get('auth')['basic'])) {
+            $this->withAuthBasic();
+        }
+    }
+
+    /**
+     * @param $arguments
      * @return array
      */
-    private function formatBody()
+    private function parseArguments($arguments): array
     {
-        $body = [];
+        $items = head($arguments);
 
-        if (!empty($this->files)) {
-            $data = [];
-
-            if(!is_null($this->serialized_payload)) {
-                collect($this->serialized_payload)->each(function($value, $key) use (&$data) {
-                    $data[] = [
-                        'name'     => $key,
-                        'contents' => $value,
-                    ];
-                });
-            }
-
-            $body['multipart'] = array_merge($this->files, $data);
-
-            return $body;
+        if (count($arguments) === 2) {
+            $items = [$arguments[0] => $arguments[1]];
         }
 
-        if ($this->content_type == Mime::JSON) {
-            $body['json'] = $this->serialized_payload;
-        } elseif ($this->method == Http::GET) {
-            $body['query'] = $this->serialized_payload;
-        } elseif (is_array($this->serialized_payload)) {
-            $body['form_params'] = $this->serialized_payload;
-        } else {
-            $body['body'] = $this->serialized_payload;
+        foreach ($items as $key => $item) {
+            $items[$key] = $item;
         }
 
-        return $body;
-    }
-
-    /**
-     * Установка URL (если не задали URL/URI через setEndpoint)
-     *
-     * @return mixed|string
-     */
-    private function formatEndpoint()
-    {
-        $url = '';
-
-        if (empty($this->uri)) {
-            $url = $this->config['url'];
-        } elseif (str_contains($this->uri, ['http', 'https'])) {
-            $url = $this->uri;
-        } elseif ($this->config->has('url')) {
-            $url = $this->config['url'] . $this->uri;
-        }
-
-        if (empty($url)) {
-            throw new RuntimeException('Attempting to send a request before defining a URI endpoint.');
-        }
-
-        return $url;
-    }
-
-    /**
-     * Хэш ссылки, заголовков и обработанного body
-     * @todo: вынести алиасы и хэш запроса в стандартный обработчик
-     *
-     * @return $this
-     */
-    private function hash()
-    {
-        $this->hash = md5($this->uri . serialize($this->headers) . serialize($this->payload));
-
-        return $this;
+        return $items;
     }
 }
